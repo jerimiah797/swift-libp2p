@@ -325,6 +325,8 @@ public final class Application: Sendable {
 
         // Resolvers
         self.resolvers.initialize()
+        // Default system resolver: /dns, /dns4, /dns6 → /ip4, /ip6 via getaddrinfo.
+        self.resolvers.use { app in SystemDNSResolver(eventLoopGroup: app.eventLoopGroup) }
 
         // Servers / Clients and final configuration (also probably databases)
         self.servers.initialize()

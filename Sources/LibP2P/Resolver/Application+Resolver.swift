@@ -32,6 +32,11 @@ extension Application {
         .init(application: self)
     }
 
+    /// Multiaddr codecs whose leading component a registered resolver may turn
+    /// into a concrete address: `/dnsaddr` (TXT) plus the A/AAAA-backed
+    /// `/dns`, `/dns4`, `/dns6` handled by ``SystemDNSResolver``.
+    static let resolvableDNSCodecs: Set<MultiaddrProtocol> = [.dnsaddr, .dns, .dns4, .dns6]
+
     //    public func resolve(_ multiaddr:Multiaddr) -> [Multiaddr]? {
     //        self.logger.trace("Attempting to resolve \(multiaddr)")
     //        guard multiaddr.addresses.first?.codec == .dnsaddr else {
@@ -85,7 +90,9 @@ extension Application {
     public func resolve(_ multiaddr: Multiaddr) -> EventLoopFuture<[Multiaddr]?> {
         self.logger.trace("Attempting to resolve \(multiaddr)")
         let el = self.eventLoopGroup.next()
-        guard multiaddr.addresses.first?.codec == .dnsaddr else {
+        guard let codec = multiaddr.addresses.first?.codec,
+            Self.resolvableDNSCodecs.contains(codec)
+        else {
             self.logger.info("Unable to resolve \(multiaddr)")
             return el.makeSucceededFuture(nil)
         }
@@ -115,7 +122,9 @@ extension Application {
     public func resolve(_ multiaddr: Multiaddr, for codecs: Set<MultiaddrProtocol>) -> EventLoopFuture<Multiaddr?> {
         self.logger.trace("Attempting to resolve \(multiaddr)")
         let el = self.eventLoopGroup.next()
-        guard multiaddr.addresses.first?.codec == .dnsaddr else {
+        guard let codec = multiaddr.addresses.first?.codec,
+            Self.resolvableDNSCodecs.contains(codec)
+        else {
             self.logger.info("Unable to resolve \(multiaddr)")
             return el.makeSucceededFuture(nil)
         }
