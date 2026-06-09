@@ -73,23 +73,44 @@ extension Application {
         externalAddressesOnly: Bool = true,
         on: EventLoop
     ) -> EventLoopFuture<[Multiaddr]> {
-        let promise = on.makePromise(of: [Multiaddr].self)
-        var dialableAddresses: [Multiaddr] = []
-
-        let _ = Set(mas).map { ma in
-            self.transports.canDial(ma, on: on).map { canDial in
-                if canDial {
-                    if externalAddressesOnly {
-                        guard !ma.isInternalAddress else { return }
-                    }
-                    dialableAddresses.append(ma)
-                }
+        // Resolve any DNS-family addresses (`/dns`, `/dns4`, `/dns6`,
+        // `/dnsaddr`) to concrete `/ip4` / `/ip6` addresses before testing
+        // dialability. This mirrors rust-libp2p's DNS transport, which resolves
+        // on every dial. Without it, a peer reachable only via a `/dns4`
+        // address (e.g. a domain-named bootstrap node) is rejected as
+        // undialable here — no transport `canDial`s a bare `/dns4` — long
+        // before the resolving client dial path (`newRequest`) is reached.
+        let resolved = Set(mas).map { ma -> EventLoopFuture<[Multiaddr]> in
+            guard let codec = ma.addresses.first?.codec,
+                Application.resolvableDNSCodecs.contains(codec)
+            else {
+                return on.makeSucceededFuture([ma])
             }
-        }.flatten(on: on).map {
-            promise.succeed(dialableAddresses)
+            return self.resolve(ma).map { $0 ?? [] }
         }
 
-        return promise.futureResult
+        return EventLoopFuture.whenAllSucceed(resolved, on: on).flatMap { groups in
+            let candidates = groups.flatMap { $0 }
+            let promise = on.makePromise(of: [Multiaddr].self)
+            var dialableAddresses: [Multiaddr] = []
+
+            let _ = candidates.map { ma in
+                self.transports.canDial(ma, on: on).map { canDial in
+                    if canDial {
+                        if externalAddressesOnly {
+                            guard !ma.isInternalAddress else { return }
+                        }
+                        if !dialableAddresses.contains(ma) {
+                            dialableAddresses.append(ma)
+                        }
+                    }
+                }
+            }.flatten(on: on).map {
+                promise.succeed(dialableAddresses)
+            }
+
+            return promise.futureResult
+        }
     }
 
     public func stripInternalAddresses(_ mas: [Multiaddr]) -> [Multiaddr] {
