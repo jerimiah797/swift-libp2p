@@ -245,6 +245,14 @@ extension Application {
         public enum Style: Sendable {
             case responseExpected
             case noResponseExpected
+            /// Write the request, then **half-close our write side (send a FIN)**,
+            /// and keep reading for the response. Use this when the responder is a
+            /// canonical libp2p `request_response` server that reads the request to
+            /// EOF before replying (e.g. rust-libp2p) — without the FIN it blocks
+            /// until its inbound timeout. Behaves like ``responseExpected`` for the
+            /// read/response side; it only adds the post-request FIN. See
+            /// `Request.halfCloseWrite()` and the burrows directory-list interop note.
+            case responseExpectedThenHalfClose
         }
 
         init(
@@ -297,10 +305,37 @@ extension Application {
                                 self.cancelTimeoutTask()
                                 req.shouldClose()
                                 self.promise.succeed(Data())
+                            } else if style == .responseExpectedThenHalfClose {
+                                // Canonical request/response: FIN our write side
+                                // now (after the request bytes), but keep reading
+                                // for the response. The FIN is queued after the
+                                // request write at the channel layer, so a
+                                // read-to-EOF responder (rust) sees the complete
+                                // request, then replies on our still-open read
+                                // half. We do NOT complete the promise here — the
+                                // `.data`/`.closed` cases still drive completion.
+                                req.halfCloseWrite()
                             }
                         }
 
                     case .data(let response):
+                        if style == .responseExpectedThenHalfClose {
+                            // Read-until-close: a canonical request/response
+                            // responder writes the whole reply then closes its
+                            // write side, and the reply can span several frames
+                            // (rust-libp2p sends e.g. count/len/blob as separate
+                            // writes). Accumulate every chunk and complete in
+                            // `.closed`; completing on the first chunk would
+                            // truncate a multi-frame response.
+                            self.buffer.withLockedValue { buf in
+                                if buf == nil { buf = req.allocator.buffer(bytes: []) }
+                                buf!.writeBytes(response.readableBytesView)
+                            }
+                            self.resetTimeoutTask()
+                            return req.eventLoop.makeSucceededFuture(
+                                RawResponse(payload: req.allocator.buffer(bytes: []))
+                            )
+                        }
                         var chunks = self.chunks.withLockedValue { $0 }
                         if chunks == 0 {
                             //Check if the response is uVarInt length prefixed....
@@ -347,9 +382,23 @@ extension Application {
 
                     case .closed:
                         if !self.hasCompleted {
-                            self._hasCompleted.withLockedValue { $0 = true }
-                            req.logger.error("Stream Closed before we got our response")
-                            self.promise.fail(Errors.FailedToOpenStream)
+                            if style == .responseExpectedThenHalfClose {
+                                // The responder finished and closed: the
+                                // accumulated buffer is the complete response
+                                // (empty if it closed without writing — the
+                                // caller treats an empty body as "no result").
+                                self._hasCompleted.withLockedValue { $0 = true }
+                                self.cancelTimeoutTask()
+                                let data = self.buffer.withLockedValue { buf -> Data in
+                                    guard let buf else { return Data() }
+                                    return Data(buf.readableBytesView)
+                                }
+                                self.promise.succeed(data)
+                            } else {
+                                self._hasCompleted.withLockedValue { $0 = true }
+                                req.logger.error("Stream Closed before we got our response")
+                                self.promise.fail(Errors.FailedToOpenStream)
+                            }
                         }
                         self.cancelTimeoutTask()
                         req.shouldClose()

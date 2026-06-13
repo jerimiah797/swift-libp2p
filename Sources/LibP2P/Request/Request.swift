@@ -234,6 +234,29 @@ public final class Request: CustomStringConvertible, Sendable {
         }
     }
 
+    /// Half-close the WRITE side of this stream (send a FIN) while keeping the
+    /// READ side open to receive a response.
+    ///
+    /// This is the canonical libp2p request/response *client* gesture: write the
+    /// request, FIN your write half, then read the reply. A canonical responder
+    /// (e.g. rust-libp2p `request_response`, which reads the request to EOF)
+    /// needs that FIN to know the request is complete before it answers. Plain
+    /// ``shouldClose()`` is a *full* close (`.all`) and would tear down the read
+    /// side too, so it cannot be used before the response arrives.
+    ///
+    /// Backed by `ChildChannel`'s `close(mode: .output)` (yamux fork). On
+    /// transports/muxers that don't implement output half-close this fails the
+    /// close future harmlessly — the request still went out; only the FIN is
+    /// skipped, which matches the prior (no-FIN) behaviour.
+    public func halfCloseWrite() {
+        self.eventLoop.execute {
+            guard self.channel.isActive else { return }
+            self.channel.close(mode: .output).whenComplete { _ in
+                self.logger.trace("Stream[\(self.protocol)] write side half-closed (FIN sent)")
+            }
+        }
+    }
+
     public var detailedDescription: String {
         """
         \(self.streamDirection == .inbound ? "Inbound" : "Outbound") request from \(self.remotePeer?.b58String ?? "Unknown Peer")
